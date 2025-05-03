@@ -1,11 +1,30 @@
 import asyncio
+import copy
 from datetime import timedelta
 from logging import getLogger
-from typing import Any, AsyncGenerator, Callable, Dict, Optional, TypeVar
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Literal,
+    Optional,
+    TypeVar,
+    Union,
+    overload,
+)
 
 from aio_pika import DeliveryMode, ExchangeType, Message, connect_robust
 from aio_pika.abc import AbstractChannel, AbstractQueue, AbstractRobustConnection
 from taskiq import AckableMessage, AsyncBroker, AsyncResultBackend, BrokerMessage
+
+from taskiq_aio_pika.types import (
+    ClassicQueueArgs,
+    DeclareQueueKwargs,
+    QueueType,
+    QuorumQueueArgs,
+    QuorumQueueDeclareQueueKwargs,
+)
 
 _T = TypeVar("_T")
 
@@ -35,6 +54,7 @@ def parse_val(
 class AioPikaBroker(AsyncBroker):
     """Broker that works with RabbitMQ."""
 
+    @overload
     def __init__(
         self,
         url: Optional[str] = None,
@@ -53,7 +73,60 @@ class AioPikaBroker(AsyncBroker):
         max_priority: Optional[int] = None,
         delayed_message_exchange_plugin: bool = False,
         declare_exchange_kwargs: Optional[Dict[Any, Any]] = None,
-        declare_queues_kwargs: Optional[Dict[Any, Any]] = None,
+        queue_type: Literal[QueueType.QUORUM] = QueueType.QUORUM,
+        declare_queues_kwargs: Optional[QuorumQueueDeclareQueueKwargs] = None,
+        declare_queues_args: Optional[QuorumQueueArgs] = None,
+        **connection_kwargs: Any,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        result_backend: Optional[AsyncResultBackend[_T]] = None,
+        task_id_generator: Optional[Callable[[], str]] = None,
+        qos: int = 10,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        exchange_name: str = "taskiq",
+        queue_name: str = "taskiq",
+        dead_letter_queue_name: Optional[str] = None,
+        delay_queue_name: Optional[str] = None,
+        declare_exchange: bool = True,
+        declare_queues: bool = True,
+        routing_key: str = "#",
+        exchange_type: ExchangeType = ExchangeType.TOPIC,
+        max_priority: Optional[int] = None,
+        delayed_message_exchange_plugin: bool = False,
+        declare_exchange_kwargs: Optional[Dict[Any, Any]] = None,
+        queue_type: Literal[QueueType.CLASSIC] = QueueType.CLASSIC,
+        declare_queues_kwargs: Optional[DeclareQueueKwargs] = None,
+        declare_queues_args: Optional[ClassicQueueArgs] = None,
+        **connection_kwargs: Any,
+    ) -> None: ...
+
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        result_backend: Optional[AsyncResultBackend[_T]] = None,
+        task_id_generator: Optional[Callable[[], str]] = None,
+        qos: int = 10,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        exchange_name: str = "taskiq",
+        queue_name: str = "taskiq",
+        dead_letter_queue_name: Optional[str] = None,
+        delay_queue_name: Optional[str] = None,
+        declare_exchange: bool = True,
+        declare_queues: bool = True,
+        routing_key: str = "#",
+        exchange_type: ExchangeType = ExchangeType.TOPIC,
+        max_priority: Optional[int] = None,
+        delayed_message_exchange_plugin: bool = False,
+        declare_exchange_kwargs: Optional[Dict[Any, Any]] = None,
+        queue_type: QueueType = QueueType.CLASSIC,
+        declare_queues_kwargs: Union[
+            QuorumQueueDeclareQueueKwargs, DeclareQueueKwargs, None
+        ] = None,
+        declare_queues_args: Union[ClassicQueueArgs, QuorumQueueArgs, None] = None,
         **connection_kwargs: Any,
     ) -> None:
         """
@@ -82,8 +155,10 @@ class AioPikaBroker(AsyncBroker):
         :param max_priority: maximum priority value for messages.
         :param delayed_message_exchange_plugin: turn on or disable
             delayed-message-exchange rabbitmq plugin.
-        :param declare_exchange_kwargs: additional from AbstractChannel.declare_exchange
-        :param declare_queues_kwargs: additional from AbstractChannel.declare_queue
+        :param declare_exchange_kwargs: arguments for AbstractChannel.declare_exchange
+        :param declare_queues_kwargs: arguments for AbstractChannel.declare_queue
+        :param queue_type: type of the queue
+        :param declare_queues_args: `arguments` parameter for AbstractChannel.declare_queue
         :param connection_kwargs: additional keyword arguments,
             for connect_robust method of aio-pika.
         """
@@ -113,6 +188,10 @@ class AioPikaBroker(AsyncBroker):
             self._delay_queue_name = delay_queue_name
 
         self._delay_plugin_exchange_name = f"{exchange_name}.plugin_delay"
+
+        self._queue_type = queue_type
+        self._declare_queues_args = declare_queues_args or {}
+        self._declare_queues_args["x-queue-type"] = self._queue_type.value
 
         self.read_conn: Optional[AbstractRobustConnection] = None
         self.write_conn: Optional[AbstractRobustConnection] = None
@@ -183,21 +262,30 @@ class AioPikaBroker(AsyncBroker):
         :param channel: channel to used for declaration.
         :return: main queue instance.
         """
+        queue_arguments_ = copy.copy(self._declare_queues_args)
+        queue_arguments_["x-dead-letter-exchange"] = ""
+        queue_arguments_["x-dead-letter-routing-key"] = self._dead_letter_queue_name
+        if self._max_priority is not None:
+            queue_arguments_["x-max-priority"] = self._max_priority
+
+        delay_queue_arguments_ = copy.copy(self._declare_queues_args)
+        delay_queue_arguments_["x-dead-letter-exchange"] = ""
+        delay_queue_arguments_["x-dead-letter-routing-key"] = self._queue_name
+
+        dead_letter_queue_arguments_ = copy.copy(self._declare_queues_args)
+
         await channel.declare_queue(
             self._dead_letter_queue_name,
+            arguments=dead_letter_queue_arguments_,
             **self._declare_queues_kwargs,
         )
-        args: "Dict[str, Any]" = {
-            "x-dead-letter-exchange": "",
-            "x-dead-letter-routing-key": self._dead_letter_queue_name,
-        }
-        if self._max_priority is not None:
-            args["x-max-priority"] = self._max_priority
+
         queue = await channel.declare_queue(
             self._queue_name,
-            arguments=args,
+            arguments=queue_arguments_,
             **self._declare_queues_kwargs,
         )
+
         if self._delayed_message_exchange_plugin:
             await queue.bind(
                 exchange=self._delay_plugin_exchange_name,
@@ -206,10 +294,7 @@ class AioPikaBroker(AsyncBroker):
         else:
             await channel.declare_queue(
                 self._delay_queue_name,
-                arguments={
-                    "x-dead-letter-exchange": "",
-                    "x-dead-letter-routing-key": self._queue_name,
-                },
+                arguments=delay_queue_arguments_,
                 **self._declare_queues_kwargs,
             )
 
@@ -217,6 +302,7 @@ class AioPikaBroker(AsyncBroker):
             exchange=self._exchange_name,
             routing_key=self._routing_key,
         )
+
         return queue
 
     async def kick(self, message: BrokerMessage) -> None:

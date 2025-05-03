@@ -14,6 +14,43 @@ async def test() -> None:
 
 ```
 
+## Configuration
+
+Here's the suggested configuration making use of RabbitMQ's more modern quorum queue type.
+
+```python
+from taskiq_aio_pika import AioPikaBroker
+
+broker = AioPikaBroker(
+    queue_type=QueueType.QUORUM,
+    declare_queues_kwargs={"durable": True},
+)
+```
+
+Some configuration parameters to keep in mind:
+* `qos` - [prefetch count](https://www.rabbitmq.com/docs/consumer-prefetch#overview), that is, the maximum number of messages that can be processed simultaneously by one worker, which makes it a measure of concurrency.
+* `queue_type` - either ["classic"](https://www.rabbitmq.com/docs/classic-queues#overview) or ["quorum"](https://www.rabbitmq.com/docs/quorum-queues#overview).
+* `declare_queues_args` - a `dict` of arguments that will be passed to aiopika's `AbstractChannel.declare_queue` method, which includes:
+** [`x-delivery-limit`](https://www.rabbitmq.com/docs/quorum-queues#poison-message-handling) (for quorum queues) - for messages that keep getting redelivered to the consumer (e.g. due to consumer application instance crashes) this sets the maximum number of proccessing attempts after which the message will be discarded (dead-lettered); defaults to 20.
+
+Other parameters of `AioPikaBroker`:
+* `url` - URL of RabbitMQ. If `None`, "amqp://guest:guest@localhost:5672" is used.
+* `result_backend` - Custom result backend.
+* `task_id_generator` - Custom task ID generator.
+* `exchange_name` - Name of the exchange that is used to send messages.
+* `exchange_type` - type of the exchange. Used only if `declare_exchange` is True.
+* `queue_name` - queue that is used to receive incoming messages.
+* `routing_key` - used to bind the queue to the exchange.
+* `declare_exchange` - whether you want to declare a new exchange if it doesn't exist.
+* `max_priority` - maximum priority for messages.
+* `delay_queue_name` - custom delay queue name.
+    This queue is used to deliver messages with delays.
+* `dead_letter_queue_name` - custom dead letter queue name.
+    This queue is used to receive negatively acknowledged messages from the main queue.
+* `declare_queues` - whether you want to declare queues even on the
+    client side. May be useful for message persistence.
+
+
 ## Non-obvious things
 
 You can send delayed messages and set priorities to messages using labels.
@@ -115,23 +152,3 @@ async def main():
     await prio_task.kicker().with_labels(priority=None).kiq()
 
 ```
-
-## Configuration
-
-AioPikaBroker parameters:
-* `url` - url to rabbitmq. If None, "amqp://guest:guest@localhost:5672" is used.
-* `result_backend` - custom result backend.
-* `task_id_generator` - custom task_id genertaor.
-* `exchange_name` - name of exchange that used to send messages.
-* `exchange_type` - type of the exchange. Used only if `declare_exchange` is True.
-* `queue_name` - queue that used to get incoming messages.
-* `routing_key` - that used to bind that queue to the exchange.
-* `declare_exchange` - whether you want to declare new exchange if it doesn't exist.
-* `max_priority` - maximum priority for messages.
-* `delay_queue_name` - custom delay queue name.
-    This queue is used to deliver messages with delays.
-* `dead_letter_queue_name` - custom dead letter queue name.
-    This queue is used to receive negatively acknowleged messages from the main queue.
-* `qos` - number of messages that worker can prefetch.
-* `declare_queues` - whether you want to declare queues even on
-    client side. May be useful for message persistance.
